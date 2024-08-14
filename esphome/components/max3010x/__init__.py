@@ -22,15 +22,9 @@ CONF_MAX3010x_ID = "max3010x_id"
 
 max3010x_ns = cg.esphome_ns.namespace("max3010x")
 
-MAX3010xComponent = max3010x_ns.class_("MAX3010xComponent", cg.Component, i2c.I2CDevice)
+MAX3010xComponent = max3010x_ns.class_("MAX3010xComponent", cg.PollingComponent, i2c.I2CDevice)
 
-MAX3010X_COMPONENT_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(CONF_MAX3010x_ID): cv.use_id(MAX3010xComponent),
-    }
-)
-
-CONFIG_SCHEMA = cv.All(
+CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(MAX3010xComponent),
@@ -53,15 +47,15 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     )
-    .extend(cv.COMPONENT_SCHEMA)
-    .extend(i2c.i2c_device_schema(0x57)),
-    cv.has_exactly_one_key(CONF_HEARTRATE, CONF_OXIMETER),
+    .extend(cv.polling_component_schema("60s"))
+    .extend(i2c.i2c_device_schema(0x57))
 )
 
 
 async def to_code_base(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    await i2c.register_i2c_device(var, config)
 
     if heart_rate_config := config.get(CONF_HEARTRATE):
         sens = await sensor.new_sensor(heart_rate_config)

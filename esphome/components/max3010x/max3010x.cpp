@@ -12,7 +12,7 @@
 namespace esphome {
 namespace max3010x {
 
-static const char *const TAG = "sensor.max3010x";
+static const char *const TAG = "max3010x";
 
 static const uint8_t MAX3010X_REGISTER_ISR1 = 0x00;
 static const uint8_t MAX3010X_REGISTER_ISR2 = 0x01;

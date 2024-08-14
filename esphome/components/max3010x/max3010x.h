@@ -2,11 +2,10 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/i2c/i2c.h"
 
 namespace esphome {
 namespace max3010x {
-
-static const char *const TAG = "sensor.max3010x";
 
 /// This class implements support for the MAX3010x heart rate and oximeter sensor.
 class MAX3010xComponent : public PollingComponent, public i2c::I2CDevice {
@@ -22,6 +21,7 @@ class MAX3010xComponent : public PollingComponent, public i2c::I2CDevice {
   float get_setup_priority() const override;
   void update() override;
 
+ protected:
   void setup_sensor(byte powerLevel, byte sampleAverage, byte ledMode, int sampleRate, int pulseWidth, int adcRange);
 
   uint32_t getRed(void);                   // Returns immediate red value
@@ -69,11 +69,11 @@ class MAX3010xComponent : public PollingComponent, public i2c::I2CDevice {
   void setFIFOAlmostFull(uint8_t samples);
 
   // FIFO Reading
-  uint16_t check(void);         // Checks for new data and fills FIFO
-  uint8_t available(void);      // Tells caller how many new samples are available (head - tail)
-  void nextSample(void);        // Advances the tail of the sense array
-  uint32_t getFIFORed(void);    // Returns the FIFO sample pointed to by tail
-  uint32_t getFIFOIR(void);     // Returns the FIFO sample pointed to by tail
+  uint16_t check(void);       // Checks for new data and fills FIFO
+  uint8_t available(void);    // Tells caller how many new samples are available (head - tail)
+  void nextSample(void);      // Advances the tail of the sense array
+  uint32_t getFIFORed(void);  // Returns the FIFO sample pointed to by tail
+  uint32_t getFIFOIR(void);   // Returns the FIFO sample pointed to by tail
 
   uint8_t getWritePointer(void);
   uint8_t getReadPointer(void);
