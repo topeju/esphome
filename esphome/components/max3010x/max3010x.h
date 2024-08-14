@@ -6,7 +6,7 @@
 namespace esphome {
 namespace max3010x {
 
-static const char *const TAG = "max3010x.sensor";
+static const char *const TAG = "sensor.max3010x";
 
 /// This class implements support for the MAX3010x heart rate and oximeter sensor.
 class MAX3010xComponent : public PollingComponent, public i2c::I2CDevice {
