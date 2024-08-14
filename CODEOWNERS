@@ -217,6 +217,7 @@ esphome/components/logger/* @esphome/core
 esphome/components/ltr390/* @sjtrny
 esphome/components/ltr_als_ps/* @latonita
 esphome/components/matrix_keypad/* @ssieb
+esphome/components/max3010x/* @topeju
 esphome/components/max31865/* @DAVe3283
 esphome/components/max44009/* @berfenger
 esphome/components/max6956/* @looping40

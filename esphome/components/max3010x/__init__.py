@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import sensor
+from esphome.components import i2c, sensor
 from esphome.const import (
     CONF_ID,
     CONF_TEMPERATURE,
@@ -13,32 +13,50 @@ from esphome.const import (
 
 CODEOWNERS = ["@topeju"]
 
+DEPENDENCIES = ["i2c"]
+
 CONF_HEARTRATE = "heart_rate"
 CONF_OXIMETER = "oximeter"
 
+CONF_MAX3010x_ID = "max3010x_id"
+
 max3010x_ns = cg.esphome_ns.namespace("max3010x")
 
-CONFIG_SCHEMA_BASE = cv.Schema(
+MAX3010xComponent = max3010x_ns.class_("MAX3010xComponent", cg.Component, i2c.I2CDevice)
+
+MAX3010X_COMPONENT_SCHEMA = cv.Schema(
     {
-        cv.Optional(CONF_HEARTRATE): sensor.sensor_schema(
-            #unit_of_measurement=,
-            accuracy_decimals=1,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_OXIMETER): sensor.sensor_schema(
-            unit_of_measurement=UNIT_PERCENT,
-            accuracy_decimals=0,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_TEMPERATURE): sensor.sensor_schema(
-            unit_of_measurement=UNIT_CELSIUS,
-            accuracy_decimals=1,
-            device_class=DEVICE_CLASS_TEMPERATURE,
-            state_class=STATE_CLASS_MEASUREMENT,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC
-        ),
+        cv.GenerateID(CONF_MAX3010x_ID): cv.use_id(MAX3010xComponent),
     }
-).extend(cv.polling_component_schema("60s"))
+)
+
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(MAX3010xComponent),
+            cv.Optional(CONF_HEARTRATE): sensor.sensor_schema(
+                #unit_of_measurement=,
+                accuracy_decimals=1,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_OXIMETER): sensor.sensor_schema(
+                unit_of_measurement=UNIT_PERCENT,
+                accuracy_decimals=0,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_TEMPERATURE): sensor.sensor_schema(
+                unit_of_measurement=UNIT_CELSIUS,
+                accuracy_decimals=1,
+                device_class=DEVICE_CLASS_TEMPERATURE,
+                state_class=STATE_CLASS_MEASUREMENT,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+            ),
+        }
+    )
+    .extend(cv.COMPONENT_SCHEMA)
+    .extend(i2c.i2c_device_schema(0x57)),
+    cv.has_exactly_one_key(CONF_HEARTRATE, CONF_OXIMETER),
+)
 
 
 async def to_code_base(config):
