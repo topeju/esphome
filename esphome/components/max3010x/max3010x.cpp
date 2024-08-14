@@ -129,6 +129,8 @@ static const uint8_t MAX3010X_ADDRESS = 0x57;  // 7-bit I2C address
 
 #define I2C_BUFFER_LENGTH 32
 
+// Mostly based on https://github.com/sparkfun/SparkFun_MAX3010x_Sensor_Library/tree/master/src
+
 void MAX3010xComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up MAX3010x...");
 
