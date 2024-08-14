@@ -402,7 +402,7 @@ uint8_t MAX3010xComponent::getRevisionID() { return revisionID; }
 //  ADC Range = 16384 (62.5pA per LSB)
 //  Sample rate = 50
 // Use the default setup if you are just getting started with the MAX3010X sensor
-void MAX3010xComponent::setup(byte powerLevel, byte sampleAverage, byte ledMode, int sampleRate, int pulseWidth,
+void MAX3010xComponent::setup_sensor(byte powerLevel, byte sampleAverage, byte ledMode, int sampleRate, int pulseWidth,
                               int adcRange) {
   softReset();  // Reset all configuration, threshold, and data registers to POR values
 

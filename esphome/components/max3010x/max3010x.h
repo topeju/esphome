@@ -13,6 +13,7 @@ class MAX3010xComponent : public PollingComponent, public i2c::I2CDevice {
  public:
   void set_heart_rate_sensor(sensor::Sensor *heart_rate_sensor) { heart_rate_sensor_ = heart_rate_sensor; }
   void set_oximeter_sensor(sensor::Sensor *oximeter_sensor) { oximeter_sensor_ = oximeter_sensor; }
+  void set_temperature_sensor(sensor::Sensor *temperature_sensor) { temperature_sensor_ = temperature_sensor; }
 
   // ========== INTERNAL METHODS ==========
   // (In most use cases you won't need these)
@@ -21,7 +22,7 @@ class MAX3010xComponent : public PollingComponent, public i2c::I2CDevice {
   float get_setup_priority() const override;
   void update() override;
 
-  boolean begin(TwoWire &wirePort = Wire, uint32_t i2cSpeed = I2C_SPEED_STANDARD, uint8_t i2caddr = MAX30105_ADDRESS);
+  void setup_sensor(byte powerLevel, byte sampleAverage, byte ledMode, int sampleRate, int pulseWidth, int adcRange);
 
   uint32_t getRed(void);                   // Returns immediate red value
   uint32_t getIR(void);                    // Returns immediate IR value
@@ -137,6 +138,7 @@ class MAX3010xComponent : public PollingComponent, public i2c::I2CDevice {
 
   sensor::Sensor *heart_rate_sensor_{nullptr};
   sensor::Sensor *oximeter_sensor_{nullptr};
+  sensor::Sensor *temperature_sensor_{nullptr};
   enum ErrorCode {
     NONE = 0,
     COMMUNICATION_FAILED,
@@ -147,7 +149,6 @@ class MAX3010xComponent : public PollingComponent, public i2c::I2CDevice {
   bool write_byte(uint8_t a_register, uint8_t data) override;
   bool read_bytes(uint8_t a_register, uint8_t *data, size_t len) override;
   bool read_byte_16(uint8_t a_register, uint16_t *data) override;
-  void dump_config() override;
 };
 
 }  // namespace max3010x
