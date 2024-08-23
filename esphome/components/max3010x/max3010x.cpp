@@ -43,23 +43,23 @@ static const uint8_t MAX3010X_PART_ID = 0x15;
 
 // MAX3010X Commands
 // Interrupt configuration (pg 13, 14)
-static const uint8_t MAX3010X_INT_A_FULL_MASK = (byte) ~0b10000000;
+static const uint8_t MAX3010X_INT_A_FULL_MASK = (uint8_t) ~0b10000000;
 static const uint8_t MAX3010X_INT_A_FULL_ENABLE = 0x80;
 static const uint8_t MAX3010X_INT_A_FULL_DISABLE = 0x00;
 
-static const uint8_t MAX3010X_INT_DATA_RDY_MASK = (byte) ~0b01000000;
+static const uint8_t MAX3010X_INT_DATA_RDY_MASK = (uint8_t) ~0b01000000;
 static const uint8_t MAX3010X_INT_DATA_RDY_ENABLE = 0x40;
 static const uint8_t MAX3010X_INT_DATA_RDY_DISABLE = 0x00;
 
-static const uint8_t MAX3010X_INT_ALC_OVF_MASK = (byte) ~0b00100000;
+static const uint8_t MAX3010X_INT_ALC_OVF_MASK = (uint8_t) ~0b00100000;
 static const uint8_t MAX3010X_INT_ALC_OVF_ENABLE = 0x20;
 static const uint8_t MAX3010X_INT_ALC_OVF_DISABLE = 0x00;
 
-static const uint8_t MAX3010X_INT_DIE_TEMP_RDY_MASK = (byte) ~0b00000010;
+static const uint8_t MAX3010X_INT_DIE_TEMP_RDY_MASK = (uint8_t) ~0b00000010;
 static const uint8_t MAX3010X_INT_DIE_TEMP_RDY_ENABLE = 0x02;
 static const uint8_t MAX3010X_INT_DIE_TEMP_RDY_DISABLE = 0x00;
 
-static const uint8_t MAX3010X_SAMPLEAVG_MASK = (byte) ~0b11100000;
+static const uint8_t MAX3010X_SAMPLEAVG_MASK = (uint8_t) ~0b11100000;
 static const uint8_t MAX3010X_SAMPLEAVG_1 = 0x00;
 static const uint8_t MAX3010X_SAMPLEAVG_2 = 0x20;
 static const uint8_t MAX3010X_SAMPLEAVG_4 = 0x40;
@@ -127,7 +127,7 @@ static const uint8_t MAX3010X_ADDRESS = 0x57;  // 7-bit I2C address
 #define I2C_SPEED_STANDARD 100000
 #define I2C_SPEED_FAST 400000
 
-#define I2C_BUFFER_LENGTH 32
+#define I2C_BUFFER_LENGTH 192
 
 // Mostly based on https://github.com/sparkfun/SparkFun_MAX3010x_Sensor_Library/tree/master/src
 
@@ -143,17 +143,64 @@ void MAX3010xComponent::setup() {
 
   // Step 1: Initial Communication and Verification
   // Check that a MAX3010X is connected
-  if (readPartID() != MAX_3010X_EXPECTEDPARTID) {
+  uint8_t partId = readPartID();
+  if (partId != MAX3010X_PART_ID) {
     // Error -- Part ID read from MAX3010X does not match expected part ID.
     // This may mean there is a physical connectivity problem (broken wire, unpowered, etc).
     this->error_code_ = WRONG_CHIP_ID;
+    this->status_set_error();
+    ESP_LOGE(TAG, "Wrong chip ID read. Expecting 0x%x, but read 0x%x", MAX3010X_PART_ID, partId);
     return;
   }
 
   // Populate revision ID
   readRevisionID();
+  ESP_LOGI(TAG, "MAX3010x revision 0x%x", revisionID);
 
-  return true;
+  //powerLevel = 0x1F, sampleAverage = 4, ledMode = 3, sampleRate = 400, pulseWidth = 411, adcRange = 4096
+  setup_sensor(0x1F, 4, 2, 400, 411, 4096);
+  setPulseAmplitudeRed(0x0A); //Turn Red LED to low to indicate sensor is running
+}
+
+void MAX3010xComponent::dump_config() {
+  ESP_LOGCONFIG(TAG, "MAX3010x:");
+  LOG_I2C_DEVICE(this);
+  if (this->is_failed()) {
+    ESP_LOGE(TAG, "Communication with MAX3010x failed!");
+  }
+  LOG_UPDATE_INTERVAL(this);
+  LOG_SENSOR("  ", "Heart rate", this->heart_rate_sensor_);
+  LOG_SENSOR("  ", "Oximeter", this->oximeter_sensor_);
+  LOG_SENSOR("  ", "Temperature", this->temperature_sensor_);
+}
+
+void MAX3010xComponent::update() {
+  // Only start operation after ~5 s in order to ensure the network is connected
+  // (and thus we can see logging)
+  if (millis() < 5000) {
+    return;
+  }
+
+  check();
+
+  uint8_t items = available();
+  while (items > 0) {
+    //uint32_t ir = getIR();
+    uint32_t ir = getFIFOIR();
+    //uint32_t ir = sense.IR[sense.head];
+    if (checkForBeat(ir)) {
+      long now = millis();
+      long delta = now - lastBeat;
+      lastBeat = now;
+      beatsPerMinute = 60000.0 / delta;
+      ESP_LOGI(TAG, "Beat!  BPM = %.0f", beatsPerMinute);
+      if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+        this->heart_rate_sensor_->publish_state(beatsPerMinute);
+      }
+    }
+    nextSample();
+    items = available();
+  }
 }
 
 //
@@ -163,54 +210,66 @@ void MAX3010xComponent::setup() {
 // Begin Interrupt configuration
 uint8_t MAX3010xComponent::getINT1(void) {
   uint8_t data;
-  read_byte(MAX3010X_REGISTER_ISR1, &data);
+  if (read_register(MAX3010X_REGISTER_ISR1, &data, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "Error reading ISR1");
+    return 0xBD;
+  }
   return data;
 }
 uint8_t MAX3010xComponent::getINT2(void) {
   uint8_t data;
-  read_byte(MAX3010X_REGISTER_ISR2, &data);
+  if (read_register(MAX3010X_REGISTER_ISR2, &data, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "Error reading ISR2");
+    return 0xBD;
+  }
   return data;
 }
 
 void MAX3010xComponent::enableAFULL(void) {
-  bitMask(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_A_FULL_MASK, MAX3010X_INT_A_FULL_ENABLE);
+  readModifyWrite(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_A_FULL_MASK, MAX3010X_INT_A_FULL_ENABLE);
 }
 void MAX3010xComponent::disableAFULL(void) {
-  bitMask(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_A_FULL_MASK, MAX3010X_INT_A_FULL_DISABLE);
+  readModifyWrite(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_A_FULL_MASK, MAX3010X_INT_A_FULL_DISABLE);
 }
 
 void MAX3010xComponent::enableDATARDY(void) {
-  bitMask(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_DATA_RDY_MASK, MAX3010X_INT_DATA_RDY_ENABLE);
+  readModifyWrite(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_DATA_RDY_MASK, MAX3010X_INT_DATA_RDY_ENABLE);
 }
 void MAX3010xComponent::disableDATARDY(void) {
-  bitMask(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_DATA_RDY_MASK, MAX3010X_INT_DATA_RDY_DISABLE);
+  readModifyWrite(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_DATA_RDY_MASK, MAX3010X_INT_DATA_RDY_DISABLE);
 }
 
 void MAX3010xComponent::enableALCOVF(void) {
-  bitMask(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_ALC_OVF_MASK, MAX3010X_INT_ALC_OVF_ENABLE);
+  readModifyWrite(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_ALC_OVF_MASK, MAX3010X_INT_ALC_OVF_ENABLE);
 }
 void MAX3010xComponent::disableALCOVF(void) {
-  bitMask(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_ALC_OVF_MASK, MAX3010X_INT_ALC_OVF_DISABLE);
+  readModifyWrite(MAX3010X_REGISTER_INTEN1, MAX3010X_INT_ALC_OVF_MASK, MAX3010X_INT_ALC_OVF_DISABLE);
 }
 
 void MAX3010xComponent::enableDIETEMPRDY(void) {
-  bitMask(MAX3010X_REGISTER_INTEN2, MAX3010X_INT_DIE_TEMP_RDY_MASK, MAX3010X_INT_DIE_TEMP_RDY_ENABLE);
+  readModifyWrite(MAX3010X_REGISTER_INTEN2, MAX3010X_INT_DIE_TEMP_RDY_MASK, MAX3010X_INT_DIE_TEMP_RDY_ENABLE);
 }
 void MAX3010xComponent::disableDIETEMPRDY(void) {
-  bitMask(MAX3010X_REGISTER_INTEN2, MAX3010X_INT_DIE_TEMP_RDY_MASK, MAX3010X_INT_DIE_TEMP_RDY_DISABLE);
+  readModifyWrite(MAX3010X_REGISTER_INTEN2, MAX3010X_INT_DIE_TEMP_RDY_MASK, MAX3010X_INT_DIE_TEMP_RDY_DISABLE);
 }
 
 // End Interrupt configuration
 
 void MAX3010xComponent::softReset(void) {
-  bitMask(MAX3010X_REGISTER_MODE_CFG, MAX3010X_RESET_MASK, MAX3010X_RESET);
+  readModifyWrite(MAX3010X_REGISTER_MODE_CFG, MAX3010X_RESET_MASK, MAX3010X_RESET);
 
   // Poll for bit to clear, reset is then complete
   // Timeout after 100ms
   unsigned long startTime = millis();
   while (millis() - startTime < 100) {
     uint8_t response;
-    read_byte(MAX3010X_REGISTER_MODE_CFG, &response);
+    if (read_register(MAX3010X_REGISTER_MODE_CFG, &response, 1, true) != i2c::ERROR_OK) {
+      this->status_set_warning();
+      ESP_LOGW(TAG, "Error reading MODE_CFG register");
+      return;
+    }
     if ((response & MAX3010X_RESET) == 0)
       break;   // We're done!
     delay(1);  // Let's not over burden the I2C bus
@@ -221,43 +280,51 @@ void MAX3010xComponent::shutDown(void) {
   // Put IC into low power mode (datasheet pg. 19)
   // During shutdown the IC will continue to respond to I2C commands but will
   // not update with or take new readings (such as temperature)
-  bitMask(MAX3010X_REGISTER_MODE_CFG, MAX3010X_SHUTDOWN_MASK, MAX3010X_SHUTDOWN);
+  readModifyWrite(MAX3010X_REGISTER_MODE_CFG, MAX3010X_SHUTDOWN_MASK, MAX3010X_SHUTDOWN);
 }
 
 void MAX3010xComponent::wakeUp(void) {
   // Pull IC out of low power mode (datasheet pg. 19)
-  bitMask(MAX3010X_REGISTER_MODE_CFG, MAX3010X_SHUTDOWN_MASK, MAX3010X_WAKEUP);
+  readModifyWrite(MAX3010X_REGISTER_MODE_CFG, MAX3010X_SHUTDOWN_MASK, MAX3010X_WAKEUP);
 }
 
 void MAX3010xComponent::setLEDMode(uint8_t mode) {
   // Set which LEDs are used for sampling -- Red only, RED+IR only, or custom.
   // See datasheet, page 19
-  bitMask(MAX3010X_REGISTER_MODE_CFG, MAX3010X_MODE_MASK, mode);
+  readModifyWrite(MAX3010X_REGISTER_MODE_CFG, MAX3010X_MODE_MASK, mode);
 }
 
 void MAX3010xComponent::setADCRange(uint8_t adcRange) {
   // adcRange: one of MAX3010X_ADCRANGE_2048, _4096, _8192, _16384
-  bitMask(MAX3010X_REGISTER_SPO2_CFG, MAX3010X_ADCRANGE_MASK, adcRange);
+  readModifyWrite(MAX3010X_REGISTER_SPO2_CFG, MAX3010X_ADCRANGE_MASK, adcRange);
 }
 
 void MAX3010xComponent::setSampleRate(uint8_t sampleRate) {
   // sampleRate: one of MAX3010X_SAMPLERATE_50, _100, _200, _400, _800, _1000, _1600, _3200
-  bitMask(MAX3010X_REGISTER_SPO2_CFG, MAX3010X_SAMPLERATE_MASK, sampleRate);
+  readModifyWrite(MAX3010X_REGISTER_SPO2_CFG, MAX3010X_SAMPLERATE_MASK, sampleRate);
 }
 
 void MAX3010xComponent::setPulseWidth(uint8_t pulseWidth) {
   // pulseWidth: one of MAX3010X_PULSEWIDTH_69, _188, _215, _411
-  bitMask(MAX3010X_REGISTER_SPO2_CFG, MAX3010X_PULSEWIDTH_MASK, pulseWidth);
+  readModifyWrite(MAX3010X_REGISTER_SPO2_CFG, MAX3010X_PULSEWIDTH_MASK, pulseWidth);
 }
 
 // NOTE: Amplitude values: 0x00 = 0mA, 0x7F = 25.4mA, 0xFF = 50mA (typical)
 // See datasheet, page 21
 void MAX3010xComponent::setPulseAmplitudeRed(uint8_t amplitude) {
-  write_byte(MAX3010X_REGISTER_LED_PULSE_AMPL1_CFG, amplitude);
+  if (this->write_register(MAX3010X_REGISTER_LED_PULSE_AMPL1_CFG, &amplitude, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "Error writing LED pulse amplitude 1 register");
+    return;
+  }
 }
 
 void MAX3010xComponent::setPulseAmplitudeIR(uint8_t amplitude) {
-  write_byte(MAX3010X_REGISTER_LED_PULSE_AMPL2_CFG, amplitude);
+  if (this->write_register(MAX3010X_REGISTER_LED_PULSE_AMPL2_CFG, &amplitude, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "Error writing LED pulse amplitude 2 register");
+    return;
+  }
 }
 
 // Given a slot number assign a thing to it
@@ -269,16 +336,16 @@ void MAX3010xComponent::enableSlot(uint8_t slotNumber, uint8_t device) {
 
   switch (slotNumber) {
     case (1):
-      bitMask(MAX3010X_REGISTER_MULTILED_MODE_CTRL1, MAX3010X_SLOT1_MASK, device);
+      readModifyWrite(MAX3010X_REGISTER_MULTILED_MODE_CTRL1, MAX3010X_SLOT1_MASK, device);
       break;
     case (2):
-      bitMask(MAX3010X_REGISTER_MULTILED_MODE_CTRL1, MAX3010X_SLOT2_MASK, device << 4);
+      readModifyWrite(MAX3010X_REGISTER_MULTILED_MODE_CTRL1, MAX3010X_SLOT2_MASK, device << 4);
       break;
     case (3):
-      bitMask(MAX3010X_REGISTER_MULTILED_MODE_CTRL2, MAX3010X_SLOT3_MASK, device);
+      readModifyWrite(MAX3010X_REGISTER_MULTILED_MODE_CTRL2, MAX3010X_SLOT3_MASK, device);
       break;
     case (4):
-      bitMask(MAX3010X_REGISTER_MULTILED_MODE_CTRL2, MAX3010X_SLOT4_MASK, device << 4);
+      readModifyWrite(MAX3010X_REGISTER_MULTILED_MODE_CTRL2, MAX3010X_SLOT4_MASK, device << 4);
       break;
     default:
       // Shouldn't be here!
@@ -288,8 +355,15 @@ void MAX3010xComponent::enableSlot(uint8_t slotNumber, uint8_t device) {
 
 // Clears all slot assignments
 void MAX3010xComponent::disableSlots(void) {
-  write_byte(MAX3010X_REGISTER_MULTILED_MODE_CTRL1, 0);
-  write_byte(MAX3010X_REGISTER_MULTILED_MODE_CTRL2, 0);
+  uint8_t value = 0;
+  if (this->write_register(MAX3010X_REGISTER_MULTILED_MODE_CTRL1, &value, 1, false) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return;
+  }
+  if (this->write_register(MAX3010X_REGISTER_MULTILED_MODE_CTRL2, &value, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return;
+  }
 }
 
 //
@@ -298,45 +372,63 @@ void MAX3010xComponent::disableSlots(void) {
 
 // Set sample average (Table 3, Page 18)
 void MAX3010xComponent::setFIFOAverage(uint8_t numberOfSamples) {
-  bitMask(MAX3010X_REGISTER_FIFO_CFG, MAX3010X_SAMPLEAVG_MASK, numberOfSamples);
+  readModifyWrite(MAX3010X_REGISTER_FIFO_CFG, MAX3010X_SAMPLEAVG_MASK, numberOfSamples);
 }
 
 // Resets all points to start in a known state
 // Page 15 recommends clearing FIFO before beginning a read
 void MAX3010xComponent::clearFIFO(void) {
-  write_byte(MAX3010X_REGISTER_FIFO_WR_PTR, 0);
-  // write_byte(MAX3010X_REGISTER_FIFO, 0);
-  write_byte(MAX3010X_REGISTER_FIFO_RD_PTR, 0);
+  uint8_t value = 0;
+  if (this->write_register(MAX3010X_REGISTER_FIFO_WR_PTR, &value, 1, false) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return;
+  }
+  if (this->write_register(MAX3010X_REGISTER_OVF_COUNTER, &value, 1, false) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return;
+  }
+  if (this->write_register(MAX3010X_REGISTER_FIFO_RD_PTR, &value, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return;
+  }
 }
 
 // Enable roll over if FIFO over flows
 void MAX3010xComponent::enableFIFORollover(void) {
-  bitMask(MAX3010X_REGISTER_FIFO_CFG, MAX3010X_ROLLOVER_MASK, MAX3010X_ROLLOVER_ENABLE);
+  readModifyWrite(MAX3010X_REGISTER_FIFO_CFG, MAX3010X_ROLLOVER_MASK, MAX3010X_ROLLOVER_ENABLE);
 }
 
 // Disable roll over if FIFO over flows
 void MAX3010xComponent::disableFIFORollover(void) {
-  bitMask(MAX3010X_REGISTER_FIFO_CFG, MAX3010X_ROLLOVER_MASK, MAX3010X_ROLLOVER_DISABLE);
+  readModifyWrite(MAX3010X_REGISTER_FIFO_CFG, MAX3010X_ROLLOVER_MASK, MAX3010X_ROLLOVER_DISABLE);
 }
 
 // Set number of samples to trigger the almost full interrupt (Page 18)
 // Power on default is 32 samples
 // Note it is reverse: 0x00 is 32 samples, 0x0F is 17 samples
 void MAX3010xComponent::setFIFOAlmostFull(uint8_t numberOfSamples) {
-  bitMask(MAX3010X_REGISTER_FIFO_CFG, MAX3010X_A_FULL_MASK, numberOfSamples);
+  readModifyWrite(MAX3010X_REGISTER_FIFO_CFG, MAX3010X_A_FULL_MASK, numberOfSamples);
 }
 
 // Read the FIFO Write Pointer
 uint8_t MAX3010xComponent::getWritePointer(void) {
   uint8_t ptr;
-  read_byte(MAX3010X_REGISTER_FIFO_WR_PTR, &ptr);
+  if (this->read_register(MAX3010X_REGISTER_FIFO_WR_PTR, &ptr, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "Error reading FIFO write pointer");
+    return 0xBD;
+  }
   return ptr;
 }
 
 // Read the FIFO Read Pointer
 uint8_t MAX3010xComponent::getReadPointer(void) {
   uint8_t ptr;
-  read_byte(MAX3010X_REGISTER_FIFO_RD_PTR, &ptr);
+  if (this->read_register(MAX3010X_REGISTER_FIFO_RD_PTR, &ptr, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "Error reading FIFO read pointer");
+    return 0xBD;
+  }
   return ptr;
 }
 
@@ -347,7 +439,11 @@ float MAX3010xComponent::readTemperature() {
   // See issue 19: https://github.com/sparkfun/SparkFun_MAX3010x_Sensor_Library/issues/19
 
   // Step 1: Config die temperature register to take 1 temperature sample
-  write_byte(MAX3010X_REGISTER_DIE_TEMP_CFG, 0x01);
+  uint8_t value = 0x01;
+  if (this->write_register(MAX3010X_REGISTER_DIE_TEMP_CFG, &value, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return NAN;
+  }
 
   // Poll for bit to clear, reading is then complete
   // Timeout after 100ms
@@ -359,7 +455,10 @@ float MAX3010xComponent::readTemperature() {
 
     // Check to see if DIE_TEMP_RDY interrupt is set
     uint8_t response;
-    read_byte(MAX3010X_REGISTER_ISR2, &response);
+    if (this->read_register(MAX3010X_REGISTER_ISR2, &response, 1, true) != i2c::ERROR_OK) {
+      this->status_set_warning();
+      return NAN;
+    }
     if ((response & MAX3010X_INT_DIE_TEMP_RDY_ENABLE) > 0)
       break;   // We're done!
     delay(1);  // Let's not over burden the I2C bus
@@ -368,7 +467,7 @@ float MAX3010xComponent::readTemperature() {
   //? if(millis() - startTime >= 100) return(-999.0);
 
   // Step 2: Read die temperature register (integer)
-  int8_t tempInt = readRegister8(MAX3010X_REGISTER_DIE_TEMP_INT);
+  int8_t tempInt = (int8_t)readRegister8(MAX3010X_REGISTER_DIE_TEMP_INT);
   uint8_t tempFrac = readRegister8(MAX3010X_REGISTER_DIE_TEMP_FRAC);  // Causes the clearing of the DIE_TEMP_RDY
                                                                       // interrupt
 
@@ -376,22 +475,12 @@ float MAX3010xComponent::readTemperature() {
   return (float) tempInt + ((float) tempFrac * 0.0625);
 }
 
-// Returns die temp in F
-float MAX3010xComponent::readTemperatureF() {
-  float temp = readTemperature();
-
-  if (temp != -999.0)
-    temp = temp * 1.8 + 32.0;
-
-  return (temp);
-}
-
 //
 // Device ID and Revision
 //
 uint8_t MAX3010xComponent::readPartID() { return readRegister8(MAX3010X_REGISTER_PART_ID); }
 
-void MAX3010xComponent::readRevisionID() { revisionID = readRegister8(MAX3010X_REGISTER_REV_ID); }
+uint8_t MAX3010xComponent::readRevisionID() { revisionID = readRegister8(MAX3010X_REGISTER_REV_ID); return revisionID; }
 
 uint8_t MAX3010xComponent::getRevisionID() { return revisionID; }
 
@@ -402,7 +491,7 @@ uint8_t MAX3010xComponent::getRevisionID() { return revisionID; }
 //  ADC Range = 16384 (62.5pA per LSB)
 //  Sample rate = 50
 // Use the default setup if you are just getting started with the MAX3010X sensor
-void MAX3010xComponent::setup_sensor(byte powerLevel, byte sampleAverage, byte ledMode, int sampleRate, int pulseWidth,
+void MAX3010xComponent::setup_sensor(uint8_t powerLevel, uint8_t sampleAverage, uint8_t ledMode, int sampleRate, int pulseWidth,
                               int adcRange) {
   softReset();  // Reset all configuration, threshold, and data registers to POR values
 
@@ -558,12 +647,22 @@ void MAX3010xComponent::nextSample(void) {
 // Call regularly
 // If new data is available, it updates the head and tail in the main struct
 // Returns number of new samples obtained
-uint16_t MAX3010xComponent::check(void) {
+uint16_t MAX3010xComponent::check() {
   // Read register FIDO_DATA in (3-byte * number of active LED) chunks
   // Until FIFO_RD_PTR = FIFO_WR_PTR
 
-  byte readPointer = getReadPointer();
-  byte writePointer = getWritePointer();
+  uint8_t readPointer;
+  uint8_t writePointer;
+  if (this->read_register(MAX3010X_REGISTER_FIFO_RD_PTR, &readPointer, 1, false) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "Error reading FIFO read pointer");
+    return 0;
+  }
+  if (this->read_register(MAX3010X_REGISTER_FIFO_WR_PTR, &writePointer, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    ESP_LOGW(TAG, "Error reading FIFO read pointer");
+    return 0;
+  }
 
   int numberOfSamples = 0;
 
@@ -593,25 +692,27 @@ uint16_t MAX3010xComponent::check(void) {
 
       bytesLeftToRead -= toGet;
 
+      read_register(MAX3010X_REGISTER_FIFO_DATA, fifo, toGet, true);
+
+      int ptr = 0;
+
       while (toGet > 0) {
         sense.head++;                // Advance the head of the storage struct
         sense.head %= STORAGE_SIZE;  // Wrap condition
 
-        byte temp[sizeof(uint32_t)];  // Array of 4 bytes that we will convert into long
         uint32_t tempLong;
 
-        // Burst read three bytes - RED
-        read_bytes(MAX3010X_REGISTER_FIFO_DATA, temp, toGet);
-
         // Convert array to long
-        tempLong = temp[2] | (temp[1] << 8) | ((temp[0] & 0x3) << 16);
+        //tempLong = temp[2] | (temp[1] << 8) | ((temp[0] & 0x3) << 16);
+        tempLong = fifo[ptr+2] | (fifo[ptr+1] << 8) | ((fifo[ptr] & 0x3) << 16);
+        ptr += 3;
 
         sense.red[sense.head] = tempLong;  // Store this reading into the sense array
 
         if (activeLEDs > 1) {
           // Burst read three more bytes - IR
-          read_bytes(MAX3010X_REGISTER_FIFO_DATA, temp, toGet);
-          tempLong = temp[2] | (temp[1] << 8) | ((temp[0] & 0x3) << 16);
+          tempLong = fifo[ptr+2] | (fifo[ptr+1] << 8) | ((fifo[ptr] & 0x3) << 16);
+          ptr += 3;
 
           sense.IR[sense.head] = tempLong;
         }
@@ -622,6 +723,8 @@ uint16_t MAX3010xComponent::check(void) {
     }  // End while (bytesLeftToRead > 0)
 
   }  // End readPtr != writePtr
+
+  ESP_LOGD(TAG, "End of check. sense.head=%d, sense.tail=%d, sense.IR[sense.head]=%d", sense.head, sense.tail, sense.IR[sense.head]);
 
   return (numberOfSamples);  // Let the world know how much new data we found
 }
@@ -644,17 +747,24 @@ bool MAX3010xComponent::safeCheck(uint8_t maxTimeToCheck) {
 }
 
 // Given a register, read it, mask it, and then set the thing
-void MAX3010xComponent::bitMask(uint8_t reg, uint8_t mask, uint8_t thing) {
+void MAX3010xComponent::readModifyWrite(uint8_t reg, uint8_t mask, uint8_t thing) {
   // Grab current register context
-  uint8_t originalContents;
+  uint8_t value;
 
-  read_byte(reg, &originalContents);
+  if (this->read_register(reg, &value, 1, false) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return;
+  }
 
   // Zero-out the portions of the register we're interested in
-  originalContents = originalContents & mask;
+  value &= mask;
+  value |= thing;
 
   // Change contents
-  write_byte(reg, originalContents | thing);
+  if (this->write_register(reg, &value, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return;
+  }
 }
 
 //
@@ -662,319 +772,104 @@ void MAX3010xComponent::bitMask(uint8_t reg, uint8_t mask, uint8_t thing) {
 //
 uint16_t MAX3010xComponent::read_u16_le_(uint8_t a_register) {
   uint16_t data = 0;
-  this->read_byte_16(a_register, &data);
+  if (this->read_register16(a_register, (uint8_t*)&data, 1, true) != i2c::ERROR_OK) {
+    this->status_set_warning();
+    return 0xBADD;
+  }
   return (data >> 8) | (data << 8);
 }
 int16_t MAX3010xComponent::read_s16_le_(uint8_t a_register) { return this->read_u16_le_(a_register); }
 
 uint8_t MAX3010xComponent::readRegister8(uint8_t a_register) {
   uint8_t data;
-  read_byte(a_register, &data);
-  return data;
-}
-
-bool MAX3010xComponent::read_byte(uint8_t a_register, uint8_t *data) { return I2CDevice::read_byte(a_register, data); };
-bool MAX3010xComponent::write_byte(uint8_t a_register, uint8_t data) {
-  return I2CDevice::write_byte(a_register, data);
-};
-bool MAX3010xComponent::read_bytes(uint8_t a_register, uint8_t *data, size_t len) {
-  return I2CDevice::read_bytes(a_register, data, len);
-};
-bool MAX3010xComponent::read_byte_16(uint8_t a_register, uint16_t *data) {
-  return I2CDevice::read_byte_16(a_register, data);
-};
-
-// Not updated from BME280:
-
-#if 0
-
-void BME280Component::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up BME280...");
-  uint8_t chip_id = 0;
-
-  // Mark as not failed before initializing. Some devices will turn off sensors to save on batteries
-  // and when they come back on, the COMPONENT_STATE_FAILED bit must be unset on the component.
-  if ((this->component_state_ & COMPONENT_STATE_MASK) == COMPONENT_STATE_FAILED) {
-    this->component_state_ &= ~COMPONENT_STATE_MASK;
-    this->component_state_ |= COMPONENT_STATE_CONSTRUCTION;
-  }
-
-  if (!this->read_byte(BME280_REGISTER_CHIPID, &chip_id)) {
-    this->error_code_ = COMMUNICATION_FAILED;
-    this->mark_failed();
-    return;
-  }
-  if (chip_id != 0x60) {
-    this->error_code_ = WRONG_CHIP_ID;
-    this->mark_failed();
-    return;
-  }
-
-  // Send a soft reset.
-  if (!this->write_byte(BME280_REGISTER_RESET, BME280_SOFT_RESET)) {
-    this->mark_failed();
-    return;
-  }
-  // Wait until the NVM data has finished loading.
-  uint8_t status;
-  uint8_t retry = 5;
-  do {  // NOLINT
-    delay(2);
-    if (!this->read_byte(BME280_REGISTER_STATUS, &status)) {
-      ESP_LOGW(TAG, "Error reading status register.");
-      this->mark_failed();
-      return;
-    }
-  } while ((status & BME280_STATUS_IM_UPDATE) && (--retry));
-  if (status & BME280_STATUS_IM_UPDATE) {
-    ESP_LOGW(TAG, "Timeout loading NVM.");
-    this->mark_failed();
-    return;
-  }
-
-  // Read calibration
-  this->calibration_.t1 = read_u16_le_(BME280_REGISTER_DIG_T1);
-  this->calibration_.t2 = read_s16_le_(BME280_REGISTER_DIG_T2);
-  this->calibration_.t3 = read_s16_le_(BME280_REGISTER_DIG_T3);
-
-  this->calibration_.p1 = read_u16_le_(BME280_REGISTER_DIG_P1);
-  this->calibration_.p2 = read_s16_le_(BME280_REGISTER_DIG_P2);
-  this->calibration_.p3 = read_s16_le_(BME280_REGISTER_DIG_P3);
-  this->calibration_.p4 = read_s16_le_(BME280_REGISTER_DIG_P4);
-  this->calibration_.p5 = read_s16_le_(BME280_REGISTER_DIG_P5);
-  this->calibration_.p6 = read_s16_le_(BME280_REGISTER_DIG_P6);
-  this->calibration_.p7 = read_s16_le_(BME280_REGISTER_DIG_P7);
-  this->calibration_.p8 = read_s16_le_(BME280_REGISTER_DIG_P8);
-  this->calibration_.p9 = read_s16_le_(BME280_REGISTER_DIG_P9);
-
-  this->calibration_.h1 = read_u8_(BME280_REGISTER_DIG_H1);
-  this->calibration_.h2 = read_s16_le_(BME280_REGISTER_DIG_H2);
-  this->calibration_.h3 = read_u8_(BME280_REGISTER_DIG_H3);
-  this->calibration_.h4 = read_u8_(BME280_REGISTER_DIG_H4) << 4 | (read_u8_(BME280_REGISTER_DIG_H4 + 1) & 0x0F);
-  this->calibration_.h5 = read_u8_(BME280_REGISTER_DIG_H5 + 1) << 4 | (read_u8_(BME280_REGISTER_DIG_H5) >> 4);
-  this->calibration_.h6 = read_u8_(BME280_REGISTER_DIG_H6);
-
-  uint8_t humid_control_val = 0;
-  if (!this->read_byte(BME280_REGISTER_CONTROLHUMID, &humid_control_val)) {
-    this->mark_failed();
-    return;
-  }
-  humid_control_val &= ~0b00000111;
-  humid_control_val |= this->humidity_oversampling_ & 0b111;
-  if (!this->write_byte(BME280_REGISTER_CONTROLHUMID, humid_control_val)) {
-    this->mark_failed();
-    return;
-  }
-
-  uint8_t config_register = 0;
-  if (!this->read_byte(BME280_REGISTER_CONFIG, &config_register)) {
-    this->mark_failed();
-    return;
-  }
-  config_register &= ~0b11111100;
-  config_register |= 0b101 << 5;  // 1000 ms standby time
-  config_register |= (this->iir_filter_ & 0b111) << 2;
-  if (!this->write_byte(BME280_REGISTER_CONFIG, config_register)) {
-    this->mark_failed();
-    return;
-  }
-}
-void BME280Component::dump_config() {
-  ESP_LOGCONFIG(TAG, "BME280:");
-  switch (this->error_code_) {
-    case COMMUNICATION_FAILED:
-      ESP_LOGE(TAG, "Communication with BME280 failed!");
-      break;
-    case WRONG_CHIP_ID:
-      ESP_LOGE(TAG, "BME280 has wrong chip ID! Is it a BME280?");
-      break;
-    case NONE:
-    default:
-      break;
-  }
-  ESP_LOGCONFIG(TAG, "  IIR Filter: %s", iir_filter_to_str(this->iir_filter_));
-  LOG_UPDATE_INTERVAL(this);
-
-  LOG_SENSOR("  ", "Temperature", this->temperature_sensor_);
-  ESP_LOGCONFIG(TAG, "    Oversampling: %s", oversampling_to_str(this->temperature_oversampling_));
-  LOG_SENSOR("  ", "Pressure", this->pressure_sensor_);
-  ESP_LOGCONFIG(TAG, "    Oversampling: %s", oversampling_to_str(this->pressure_oversampling_));
-  LOG_SENSOR("  ", "Humidity", this->humidity_sensor_);
-  ESP_LOGCONFIG(TAG, "    Oversampling: %s", oversampling_to_str(this->humidity_oversampling_));
-}
-float BME280Component::get_setup_priority() const { return setup_priority::DATA; }
-
-inline uint8_t oversampling_to_time(BME280Oversampling over_sampling) { return (1 << uint8_t(over_sampling)) >> 1; }
-
-void BME280Component::update() {
-  // Enable sensor
-  ESP_LOGV(TAG, "Sending conversion request...");
-  uint8_t meas_value = 0;
-  meas_value |= (this->temperature_oversampling_ & 0b111) << 5;
-  meas_value |= (this->pressure_oversampling_ & 0b111) << 2;
-  meas_value |= BME280_MODE_FORCED;
-  if (!this->write_byte(BME280_REGISTER_CONTROL, meas_value)) {
+  if (this->read_register(a_register, &data, 1, true) != i2c::ERROR_OK) {
     this->status_set_warning();
-    return;
+    return 0xBD;
   }
-
-  float meas_time = 1.5f;
-  meas_time += 2.3f * oversampling_to_time(this->temperature_oversampling_);
-  meas_time += 2.3f * oversampling_to_time(this->pressure_oversampling_) + 0.575f;
-  meas_time += 2.3f * oversampling_to_time(this->humidity_oversampling_) + 0.575f;
-
-  this->set_timeout("data", uint32_t(ceilf(meas_time)), [this]() {
-    uint8_t data[8];
-    if (!this->read_bytes(BME280_REGISTER_MEASUREMENTS, data, 8)) {
-      ESP_LOGW(TAG, "Error reading registers.");
-      this->status_set_warning();
-      return;
-    }
-    int32_t t_fine = 0;
-    float const temperature = this->read_temperature_(data, &t_fine);
-    if (std::isnan(temperature)) {
-      ESP_LOGW(TAG, "Invalid temperature, cannot read pressure & humidity values.");
-      this->status_set_warning();
-      return;
-    }
-    float const pressure = this->read_pressure_(data, t_fine);
-    float const humidity = this->read_humidity_(data, t_fine);
-
-    ESP_LOGV(TAG, "Got temperature=%.1f°C pressure=%.1fhPa humidity=%.1f%%", temperature, pressure, humidity);
-    if (this->temperature_sensor_ != nullptr)
-      this->temperature_sensor_->publish_state(temperature);
-    if (this->pressure_sensor_ != nullptr)
-      this->pressure_sensor_->publish_state(pressure);
-    if (this->humidity_sensor_ != nullptr)
-      this->humidity_sensor_->publish_state(humidity);
-    this->status_clear_warning();
-  });
-}
-float BME280Component::read_temperature_(const uint8_t *data, int32_t *t_fine) {
-  int32_t adc = ((data[3] & 0xFF) << 16) | ((data[4] & 0xFF) << 8) | (data[5] & 0xFF);
-  adc >>= 4;
-  if (adc == 0x80000) {
-    // temperature was disabled
-    return NAN;
-  }
-
-  const int32_t t1 = this->calibration_.t1;
-  const int32_t t2 = this->calibration_.t2;
-  const int32_t t3 = this->calibration_.t3;
-
-  int32_t const var1 = (((adc >> 3) - (t1 << 1)) * t2) >> 11;
-  int32_t const var2 = (((((adc >> 4) - t1) * ((adc >> 4) - t1)) >> 12) * t3) >> 14;
-  *t_fine = var1 + var2;
-
-  float const temperature = (*t_fine * 5 + 128);
-  return temperature / 25600.0f;
-}
-
-float BME280Component::read_pressure_(const uint8_t *data, int32_t t_fine) {
-  int32_t adc = ((data[0] & 0xFF) << 16) | ((data[1] & 0xFF) << 8) | (data[2] & 0xFF);
-  adc >>= 4;
-  if (adc == 0x80000) {
-    // pressure was disabled
-    return NAN;
-  }
-  const int64_t p1 = this->calibration_.p1;
-  const int64_t p2 = this->calibration_.p2;
-  const int64_t p3 = this->calibration_.p3;
-  const int64_t p4 = this->calibration_.p4;
-  const int64_t p5 = this->calibration_.p5;
-  const int64_t p6 = this->calibration_.p6;
-  const int64_t p7 = this->calibration_.p7;
-  const int64_t p8 = this->calibration_.p8;
-  const int64_t p9 = this->calibration_.p9;
-
-  int64_t var1, var2, p;
-  var1 = int64_t(t_fine) - 128000;
-  var2 = var1 * var1 * p6;
-  var2 = var2 + ((var1 * p5) << 17);
-  var2 = var2 + (p4 << 35);
-  var1 = ((var1 * var1 * p3) >> 8) + ((var1 * p2) << 12);
-  var1 = ((int64_t(1) << 47) + var1) * p1 >> 33;
-
-  if (var1 == 0)
-    return NAN;
-
-  p = 1048576 - adc;
-  p = (((p << 31) - var2) * 3125) / var1;
-  var1 = (p9 * (p >> 13) * (p >> 13)) >> 25;
-  var2 = (p8 * p) >> 19;
-
-  p = ((p + var1 + var2) >> 8) + (p7 << 4);
-  return (p / 256.0f) / 100.0f;
-}
-
-float BME280Component::read_humidity_(const uint8_t *data, int32_t t_fine) {
-  uint16_t const raw_adc = ((data[6] & 0xFF) << 8) | (data[7] & 0xFF);
-  if (raw_adc == 0x8000)
-    return NAN;
-
-  int32_t const adc = raw_adc;
-
-  const int32_t h1 = this->calibration_.h1;
-  const int32_t h2 = this->calibration_.h2;
-  const int32_t h3 = this->calibration_.h3;
-  const int32_t h4 = this->calibration_.h4;
-  const int32_t h5 = this->calibration_.h5;
-  const int32_t h6 = this->calibration_.h6;
-
-  int32_t v_x1_u32r = t_fine - 76800;
-
-  v_x1_u32r = ((((adc << 14) - (h4 << 20) - (h5 * v_x1_u32r)) + 16384) >> 15) *
-              (((((((v_x1_u32r * h6) >> 10) * (((v_x1_u32r * h3) >> 11) + 32768)) >> 10) + 2097152) * h2 + 8192) >> 14);
-
-  v_x1_u32r = v_x1_u32r - (((((v_x1_u32r >> 15) * (v_x1_u32r >> 15)) >> 7) * h1) >> 4);
-
-  v_x1_u32r = v_x1_u32r < 0 ? 0 : v_x1_u32r;
-  v_x1_u32r = v_x1_u32r > 419430400 ? 419430400 : v_x1_u32r;
-  float const h = v_x1_u32r >> 12;
-
-  return h / 1024.0f;
-}
-void BME280Component::set_temperature_oversampling(BME280Oversampling temperature_over_sampling) {
-  this->temperature_oversampling_ = temperature_over_sampling;
-}
-void BME280Component::set_pressure_oversampling(BME280Oversampling pressure_over_sampling) {
-  this->pressure_oversampling_ = pressure_over_sampling;
-}
-void BME280Component::set_humidity_oversampling(BME280Oversampling humidity_over_sampling) {
-  this->humidity_oversampling_ = humidity_over_sampling;
-}
-void BME280Component::set_iir_filter(BME280IIRFilter iir_filter) { this->iir_filter_ = iir_filter; }
-uint8_t BME280Component::read_u8_(uint8_t a_register) {
-  uint8_t data = 0;
-  this->read_byte(a_register, &data);
   return data;
 }
-uint16_t BME280Component::read_u16_le_(uint8_t a_register) {
-  uint16_t data = 0;
-  this->read_byte_16(a_register, &data);
-  return (data >> 8) | (data << 8);
+
+bool MAX3010xComponent::checkForBeat(uint32_t sample)
+{
+  bool beatDetected = false;
+
+  //  Save current state
+  IR_AC_Signal_Previous = IR_AC_Signal_Current;
+  
+  //This is good to view for debugging
+  ESP_LOGD(TAG, "Signal_Current: %0d", IR_AC_Signal_Current);
+
+  //  Process next data sample
+  IR_Average_Estimated = averageDCEstimator(&ir_avg_reg, sample);
+  IR_AC_Signal_Current = lowPassFIRFilter(sample - IR_Average_Estimated);
+
+  //  Detect positive zero crossing (rising edge)
+  if ((IR_AC_Signal_Previous < 0) && (IR_AC_Signal_Current >= 0)) {
+    IR_AC_Max = IR_AC_Signal_max; //Adjust our AC max and min
+    IR_AC_Min = IR_AC_Signal_min;
+
+    positiveEdge = 1;
+    negativeEdge = 0;
+    IR_AC_Signal_max = 0;
+
+    //if ((IR_AC_Max - IR_AC_Min) > 100 & (IR_AC_Max - IR_AC_Min) < 1000)
+    if (((IR_AC_Max - IR_AC_Min) > 20) && ((IR_AC_Max - IR_AC_Min) < 1000)) {
+      //Heart beat!!!
+      beatDetected = true;
+    }
+  }
+
+  //  Detect negative zero crossing (falling edge)
+  if ((IR_AC_Signal_Previous > 0) && (IR_AC_Signal_Current <= 0)) {
+    positiveEdge = 0;
+    negativeEdge = 1;
+    IR_AC_Signal_min = 0;
+  }
+
+  //  Find Maximum value in positive cycle
+  if (positiveEdge && (IR_AC_Signal_Current > IR_AC_Signal_Previous)) {
+    IR_AC_Signal_max = IR_AC_Signal_Current;
+  }
+
+  //  Find Minimum value in negative cycle
+  if (negativeEdge && (IR_AC_Signal_Current < IR_AC_Signal_Previous)) {
+    IR_AC_Signal_min = IR_AC_Signal_Current;
+  }
+  
+  return beatDetected;
 }
-int16_t BME280Component::read_s16_le_(uint8_t a_register) { return this->read_u16_le_(a_register); }
 
-bool BME280I2CComponent::read_byte(uint8_t a_register, uint8_t *data) {
-  return I2CDevice::read_byte(a_register, data);
-};
-bool BME280I2CComponent::write_byte(uint8_t a_register, uint8_t data) {
-  return I2CDevice::write_byte(a_register, data);
-};
-bool BME280I2CComponent::read_bytes(uint8_t a_register, uint8_t *data, size_t len) {
-  return I2CDevice::read_bytes(a_register, data, len);
-};
-bool BME280I2CComponent::read_byte_16(uint8_t a_register, uint16_t *data) {
-  return I2CDevice::read_byte_16(a_register, data);
-};
-
-void BME280I2CComponent::dump_config() {
-  LOG_I2C_DEVICE(this);
-  BME280Component::dump_config();
+//  Average DC Estimator
+int16_t MAX3010xComponent::averageDCEstimator(int32_t *p, uint16_t x)
+{
+  *p += ((((long) x << 15) - *p) >> 4);
+  return (*p >> 15);
 }
 
-#endif
+//  Integer multiplier
+static int32_t mul16(int16_t x, int16_t y)
+{
+  return((long)x * (long)y);
+}
+
+static const uint16_t FIRCoeffs[12] = {172, 321, 579, 927, 1360, 1858, 2390, 2916, 3391, 3768, 4012, 4096};
+
+//  Low Pass FIR Filter
+int16_t MAX3010xComponent::lowPassFIRFilter(int16_t din)
+{  
+  cbuf[offset] = din;
+
+  int32_t z = mul16(FIRCoeffs[11], cbuf[(offset - 11) & 0x1F]);
+  
+  for (uint8_t i = 0 ; i < 11 ; i++) {
+    z += mul16(FIRCoeffs[i], cbuf[(offset - i) & 0x1F] + cbuf[(offset - 22 + i) & 0x1F]);
+  }
+
+  offset++;
+  offset %= 32; //Wrap condition
+
+  return(z >> 15);
+}
 
 }  // namespace max3010x
 }  // namespace esphome
