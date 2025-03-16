@@ -22,7 +22,7 @@ void DM556::dump_config() {
   ESP_LOGCONFIG(TAG, "DM556:");
   LOG_PIN("  Step Pin: ", this->step_pin_);
   LOG_PIN("  Dir Pin: ", this->dir_pin_);
-  LOG_PIN("  Sleep Pin: ", this->enable_pin_);
+  LOG_PIN("  Enable Pin: ", this->enable_pin_);
   LOG_STEPPER(this);
 }
 void DM556::loop() {
