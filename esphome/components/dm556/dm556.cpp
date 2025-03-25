@@ -31,7 +31,6 @@ void DM556::loop() {
     bool enable_falling_edge = enable_pin_state_ && !at_target;
     this->enable_pin_->digital_write(!at_target);
     this->enable_pin_state_ = !at_target;
-    ESP_LOGD("dm556", "Enable pin set to %d", !at_target);
     if (enable_falling_edge) {
       delayMicroseconds(1000);
     }
